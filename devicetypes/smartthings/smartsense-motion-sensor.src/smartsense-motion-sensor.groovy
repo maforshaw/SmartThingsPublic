@@ -1,26 +1,30 @@
-/**
- *  SmartSense Motion/Temp Sensor
+/*
+ *  Copyright 2016 SmartThings
  *
- *  Copyright 2014 SmartThings
- *
- *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
- *  in compliance with the License. You may obtain a copy of the License at:
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ *  use this file except in compliance with the License. You may obtain a copy
+ *  of the License at:
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
- *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
- *  for the specific language governing permissions and limitations under the License.
- *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ *  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ *  License for the specific language governing permissions and limitations
+ *  under the License.
  */
+import physicalgraph.zigbee.clusters.iaszone.ZoneStatus
+
 
 metadata {
-	definition (name: "SmartSense Motion Sensor", namespace: "smartthings", author: "SmartThings") {
+	definition (name: "SmartSense Motion Sensor", namespace: "smartthings", author: "SmartThings", category: "C2") {
 		capability "Motion Sensor"
 		capability "Configuration"
 		capability "Battery"
 		capability "Temperature Measurement"
 		capability "Refresh"
+		capability "Health Check"
+		capability "Sensor"		
 
 		command "enrollResponse"
 
@@ -29,6 +33,7 @@ metadata {
 		fingerprint inClusters: "0000,0001,0003,0402,0500,0020,0B05", outClusters: "0019", manufacturer: "CentraLite", model: "3305"
 		fingerprint inClusters: "0000,0001,0003,0402,0500,0020,0B05", outClusters: "0019", manufacturer: "CentraLite", model: "3325"
 		fingerprint inClusters: "0000,0001,0003,0402,0500,0020,0B05", outClusters: "0019", manufacturer: "CentraLite", model: "3326"
+		fingerprint inClusters: "0000,0001,0003,0402,0500,0020,0B05", outClusters: "0019", manufacturer: "CentraLite", model: "3326-L", deviceJoinName: "Iris Motion Sensor"
 		fingerprint inClusters: "0000,0001,0003,000F,0020,0402,0500", outClusters: "0019", manufacturer: "SmartThings", model: "motionv4", deviceJoinName: "Motion Sensor"
 	}
 
@@ -46,7 +51,7 @@ metadata {
 				])
 		}
 		section {
-			input title: "Temperature Offset", description: "This feature allows you to correct any temperature variations by selecting an offset. Ex: If your sensor consistently reports a temp that's 5 degrees too warm, you'd enter \"-5\". If 3 degrees too cold, enter \"+3\".", displayDuringSetup: false, type: "paragraph", element: "paragraph"
+			input title: "Temperature Offset", description: "This feature allows you to correct any temperature variations by selecting an offset. Ex: If your sensor consistently reports a temp that's 5 degrees too warm, you'd enter '-5'. If 3 degrees too cold, enter '+3'.", displayDuringSetup: false, type: "paragraph", element: "paragraph"
 			input "tempOffset", "number", title: "Degrees", description: "Adjust temperature by this many degrees", range: "*..*", displayDuringSetup: false
 		}
 	}
@@ -180,44 +185,10 @@ private Map parseCustomMessage(String description) {
 }
 
 private Map parseIasMessage(String description) {
-	List parsedMsg = description.split(' ')
-	String msgCode = parsedMsg[2]
+	ZoneStatus zs = zigbee.parseZoneStatus(description)
 
-	Map resultMap = [:]
-	switch(msgCode) {
-		case '0x0020': // Closed/No Motion/Dry
-			resultMap = getMotionResult('inactive')
-			break
-
-		case '0x0021': // Open/Motion/Wet
-			resultMap = getMotionResult('active')
-			break
-
-		case '0x0022': // Tamper Alarm
-			log.debug 'motion with tamper alarm'
-			resultMap = getMotionResult('active')
-			break
-
-		case '0x0023': // Battery Alarm
-			break
-
-		case '0x0024': // Supervision Report
-			log.debug 'no motion with tamper alarm'
-			resultMap = getMotionResult('inactive')
-			break
-
-		case '0x0025': // Restore Report
-			break
-
-		case '0x0026': // Trouble/Failure
-			log.debug 'motion with failure alarm'
-			resultMap = getMotionResult('active')
-			break
-
-		case '0x0028': // Test Mode
-			break
-	}
-	return resultMap
+	// Some sensor models that use this DTH use alarm1 and some use alarm2 to signify motion
+	return (zs.isAlarm1Set() || zs.isAlarm2Set()) ? getMotionResult('active') : getMotionResult('inactive')
 }
 
 def getTemperature(value) {
@@ -235,7 +206,8 @@ private Map getBatteryResult(rawValue) {
 
 	def result = [
 		name: 'battery',
-		value: '--'
+		value: '--',
+		translatable: true
 	]
 
 	def volts = rawValue / 10
@@ -243,7 +215,7 @@ private Map getBatteryResult(rawValue) {
 	if (rawValue == 0 || rawValue == 255) {}
 	else {
 		if (volts > 3.5) {
-			result.descriptionText = "${linkText} battery has too much power (${volts} volts)."
+			result.descriptionText = "{{ device.displayName }} battery has too much power: (> 3.5) volts."
 		}
 		else {
 			if (device.getDataValue("manufacturer") == "SmartThings") {
@@ -260,15 +232,17 @@ private Map getBatteryResult(rawValue) {
 				def pct = batteryMap[volts]
 				if (pct != null) {
 					result.value = pct
-					result.descriptionText = "${linkText} battery was ${result.value}%"
+                    def value = pct
+					result.descriptionText = "{{ device.displayName }} battery was {{ value }}%"
 				}
 			}
 			else {
 				def minVolts = 2.1
 				def maxVolts = 3.0
 				def pct = (volts - minVolts) / (maxVolts - minVolts)
-				result.value = Math.min(100, (int) pct * 100)
-				result.descriptionText = "${linkText} battery was ${result.value}%"
+				def roundedPct = Math.round(pct * 100)
+				result.value = Math.min(100, roundedPct)
+				result.descriptionText = "{{ device.displayName }} battery was {{ value }}%"
 			}
 		}
 	}
@@ -278,28 +252,33 @@ private Map getBatteryResult(rawValue) {
 
 private Map getTemperatureResult(value) {
 	log.debug 'TEMP'
-	def linkText = getLinkText(device)
 	if (tempOffset) {
 		def offset = tempOffset as int
 		def v = value as int
 		value = v + offset
 	}
-	def descriptionText = "${linkText} was ${value}°${temperatureScale}"
+    def descriptionText
+    if ( temperatureScale == 'C' )
+    	descriptionText = '{{ device.displayName }} was {{ value }}°C'
+    else
+    	descriptionText = '{{ device.displayName }} was {{ value }}°F'
+
 	return [
 		name: 'temperature',
 		value: value,
-		descriptionText: descriptionText
+		descriptionText: descriptionText,
+        translatable: true
 	]
 }
 
 private Map getMotionResult(value) {
 	log.debug 'motion'
-	String linkText = getLinkText(device)
-	String descriptionText = value == 'active' ? "${linkText} detected motion" : "${linkText} motion has stopped"
+	String descriptionText = value == 'active' ? "{{ device.displayName }} detected motion" : "{{ device.displayName }} motion has stopped"
 	return [
 		name: 'motion',
 		value: value,
-		descriptionText: descriptionText
+		descriptionText: descriptionText,
+        translatable: true
 	]
 }
 
@@ -314,6 +293,8 @@ def refresh() {
 }
 
 def configure() {
+	sendEvent(name: "checkInterval", value: 7200, displayed: false)
+
 	String zigbeeEui = swapEndianHex(device.hub.zigbeeEui)
 	log.debug "Configuring Reporting, IAS CIE, and Bindings."
 
